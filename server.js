@@ -8,7 +8,8 @@
  *    TWILIO_ACCOUNT_SID   → Your Twilio Account SID   (ACxxxxxxx)
  *    TWILIO_AUTH_TOKEN    → Your Twilio Auth Token
  *    TWILIO_FROM_NUMBER   → Your Twilio phone number  (+1xxxxxxxxxx)
- *    EMERGENCY_TO_NUMBER  → Emergency contact number  (+91xxxxxxxxxx)
+ *    EMERGENCY_TO_NUMBER  → Primary emergency contact  (+91xxxxxxxxxx)
+ *    EMERGENCY_TO_NUMBER2 → Secondary emergency contact (+91xxxxxxxxxx)
  *    PORT                 → (Railway sets this automatically)
  *
  * ================================================================
@@ -31,7 +32,8 @@ const PORT = process.env.PORT || 3000;
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
 const fromNumber = process.env.TWILIO_FROM_NUMBER;
-const toNumber   = process.env.EMERGENCY_TO_NUMBER;
+const toNumber1  = process.env.EMERGENCY_TO_NUMBER;   // +918919306277
+const toNumber2  = process.env.EMERGENCY_TO_NUMBER2;  // +919848419422
 
 const client = twilio(accountSid, authToken);
 
@@ -62,17 +64,9 @@ function buildVoiceMessage(gas, temp, hum) {
             This message will now repeat.`;
 }
 
-// ── Helper: make Twilio voice call ───────────────────────────
-async function makeTwilioCall(gas, temp, hum) {
-    if (!accountSid || !authToken || !fromNumber || !toNumber) {
-        console.error('[Twilio] Missing env variables — cannot make call');
-        return { success: false, error: 'Twilio not configured' };
-    }
-
+// ── Helper: call a single number ────────────────────────────
+async function callNumber(toNumber, gas, temp, hum) {
     const message = buildVoiceMessage(gas, temp, hum);
-
-    // FIXED: Using voice="alice" which works on Twilio free trial
-    // Polly.Joanna is a paid feature and causes free trial to play generic message
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Pause length="1"/>
@@ -83,17 +77,55 @@ async function makeTwilioCall(gas, temp, hum) {
 
     try {
         const call = await client.calls.create({
-            twiml:  twiml,
-            to:     toNumber,
-            from:   fromNumber,
+            twiml: twiml,
+            to:    toNumber,
+            from:  fromNumber,
         });
-
-        console.log(`[Twilio] ✓ Call initiated — SID: ${call.sid}`);
-        return { success: true, sid: call.sid, to: toNumber, from: fromNumber };
-
+        console.log(`[Twilio] ✓ Call initiated to ${toNumber} — SID: ${call.sid}`);
+        return { success: true, sid: call.sid, to: toNumber };
     } catch (err) {
-        console.error(`[Twilio] ✗ Call failed — ${err.message}`);
-        return { success: false, error: err.message };
+        console.error(`[Twilio] ✗ Call to ${toNumber} failed — ${err.message}`);
+        return { success: false, error: err.message, to: toNumber };
+    }
+}
+
+// ── Helper: call BOTH numbers simultaneously ─────────────────
+async function makeTwilioCall(gas, temp, hum) {
+    if (!accountSid || !authToken || !fromNumber) {
+        console.error('[Twilio] Missing env variables — cannot make call');
+        return { success: false, error: 'Twilio not configured' };
+    }
+
+    const numbers = [];
+    if (toNumber1) numbers.push(toNumber1);
+    if (toNumber2) numbers.push(toNumber2);
+
+    if (numbers.length === 0) {
+        return { success: false, error: 'No emergency numbers configured' };
+    }
+
+    // Call all numbers at the same time
+    const results = await Promise.all(
+        numbers.map(num => callNumber(num, gas, temp, hum))
+    );
+
+    const successful = results.filter(r => r.success);
+    const failed     = results.filter(r => !r.success);
+
+    console.log(`[Twilio] Called ${successful.length}/${numbers.length} numbers successfully`);
+
+    if (successful.length > 0) {
+        return {
+            success: true,
+            sid:     successful[0].sid,
+            to:      numbers.join(' & '),
+            results: results
+        };
+    } else {
+        return {
+            success: false,
+            error:   failed.map(f => f.error).join(', ')
+        };
     }
 }
 
@@ -132,7 +164,7 @@ app.post('/update', async (req, res) => {
     // AUTO-CALL if gas exceeds danger threshold
     if (parseFloat(gas) >= 3000 && !autoCallCooldown) {
         autoCallCooldown = true;
-        console.log(`[AutoCall] Gas critical at ${Math.round(gas)} ppm — triggering Twilio call`);
+        console.log(`[AutoCall] Gas critical at ${Math.round(gas)} ppm — calling both numbers`);
 
         makeTwilioCall(gas, temperature, humidity).then(result => {
             console.log('[AutoCall] Result:', result);
@@ -150,9 +182,7 @@ app.post('/call', async (req, res) => {
     const temp = req.body.temperature ?? latestData.temperature;
     const hum  = req.body.humidity    ?? latestData.humidity;
 
-    
-
-    console.log(`[ManualCall] Triggered from dashboard — Gas:${Math.round(gas)}ppm`);
+    console.log(`[ManualCall] Triggered — calling both numbers. Gas:${Math.round(gas)}ppm`);
 
     const result = await makeTwilioCall(gas, temp, hum);
 
@@ -161,7 +191,6 @@ app.post('/call', async (req, res) => {
             status:  'calling',
             sid:     result.sid,
             to:      result.to,
-            from:    result.from,
             message: `Calling ${result.to}`
         });
     } else {
@@ -178,7 +207,8 @@ app.listen(PORT, () => {
     console.log(`║  InduShield Railway Server       ║`);
     console.log(`║  Listening on port ${PORT}          ║`);
     console.log(`╚══════════════════════════════════╝`);
-    console.log(`[Twilio] FROM : ${fromNumber || '⚠ NOT SET'}`);
-    console.log(`[Twilio] TO   : ${toNumber   || '⚠ NOT SET'}`);
-    console.log(`[Twilio] SID  : ${accountSid ? accountSid.slice(0,10)+'...' : '⚠ NOT SET'}`);
+    console.log(`[Twilio] FROM    : ${fromNumber  || '⚠ NOT SET'}`);
+    console.log(`[Twilio] TO (1)  : ${toNumber1   || '⚠ NOT SET'}`);
+    console.log(`[Twilio] TO (2)  : ${toNumber2   || '⚠ NOT SET'}`);
+    console.log(`[Twilio] SID     : ${accountSid ? accountSid.slice(0,10)+'...' : '⚠ NOT SET'}`);
 });
