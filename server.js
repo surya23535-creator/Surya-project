@@ -150,6 +150,8 @@ app.post('/call', async (req, res) => {
     const temp = req.body.temperature ?? latestData.temperature;
     const hum  = req.body.humidity    ?? latestData.humidity;
 
+    
+
     console.log(`[ManualCall] Triggered from dashboard — Gas:${Math.round(gas)}ppm`);
 
     const result = await makeTwilioCall(gas, temp, hum);
