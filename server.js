@@ -17,7 +17,6 @@
  *    GET  /data     ← Dashboard reads latest sensor data
  *    POST /call     ← Dashboard triggers manual call
  *    GET  /ping     ← Keep-alive health check
- *    GET  /twiml    ← Twilio fetches voice message XML from here
  * ================================================================
  */
 
@@ -31,13 +30,13 @@ const PORT = process.env.PORT || 3000;
 // ── Twilio client ────────────────────────────────────────────
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
-const fromNumber = process.env.TWILIO_FROM_NUMBER;     // e.g. +12345678901
-const toNumber   = process.env.EMERGENCY_TO_NUMBER;    // e.g. +919876543210
+const fromNumber = process.env.TWILIO_FROM_NUMBER;
+const toNumber   = process.env.EMERGENCY_TO_NUMBER;
 
 const client = twilio(accountSid, authToken);
 
 // ── Middleware ───────────────────────────────────────────────
-app.use(cors());                        // Allow dashboard origin
+app.use(cors());
 app.use(express.json());
 
 // ── In-memory latest sensor data ────────────────────────────
@@ -49,17 +48,18 @@ let latestData = {
     lastUpdate:  null
 };
 
-// Auto-call cooldown — prevent spam (30 s cooldown)
+// Auto-call cooldown — prevent spam (30s cooldown)
 let autoCallCooldown = false;
 
-// ── Helper: build voice message string ──────────────────────
+// ── YOUR CUSTOM VOICE MESSAGE — EDIT THIS ───────────────────
 function buildVoiceMessage(gas, temp, hum) {
-    return `Warning! Dangerous gas level detected in the lab. 
+    return `Alert! Alert! This is an automated emergency call from the InduShield monitoring system in the GIOE Lab. 
+            A dangerous situation has been detected and immediate action is required. 
             Gas concentration is ${Math.round(gas)} parts per million. 
             Temperature is ${parseFloat(temp).toFixed(1)} degrees Celsius. 
             Humidity is ${parseFloat(hum).toFixed(0)} percent. 
-            Please take immediate action and evacuate the area.
-            This is an automated alert from InduShield monitoring system.`;
+            Please evacuate the lab immediately and contact the lab supervisor. 
+            This message will now repeat.`;
 }
 
 // ── Helper: make Twilio voice call ───────────────────────────
@@ -71,13 +71,14 @@ async function makeTwilioCall(gas, temp, hum) {
 
     const message = buildVoiceMessage(gas, temp, hum);
 
-    // TwiML: what Twilio says when the call is answered
+    // FIXED: Using voice="alice" which works on Twilio free trial
+    // Polly.Joanna is a paid feature and causes free trial to play generic message
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Pause length="1"/>
-  <Say voice="Polly.Joanna" rate="90%">${message}</Say>
+  <Say voice="alice">${message}</Say>
   <Pause length="1"/>
-  <Say voice="Polly.Joanna" rate="90%">Repeating. ${message}</Say>
+  <Say voice="alice">${message}</Say>
 </Response>`;
 
     try {
@@ -128,7 +129,7 @@ app.post('/update', async (req, res) => {
 
     console.log(`[Data] Gas:${Math.round(gas)}ppm Temp:${parseFloat(temperature).toFixed(1)}°C Hum:${parseFloat(humidity).toFixed(0)}%`);
 
-    // ── AUTO-CALL if gas exceeds danger threshold ────────────
+    // AUTO-CALL if gas exceeds danger threshold
     if (parseFloat(gas) >= 3000 && !autoCallCooldown) {
         autoCallCooldown = true;
         console.log(`[AutoCall] Gas critical at ${Math.round(gas)} ppm — triggering Twilio call`);
@@ -137,7 +138,6 @@ app.post('/update', async (req, res) => {
             console.log('[AutoCall] Result:', result);
         });
 
-        // Reset cooldown after 30 seconds
         setTimeout(() => { autoCallCooldown = false; }, 30000);
     }
 
@@ -146,7 +146,7 @@ app.post('/update', async (req, res) => {
 
 // ── POST /call — dashboard manual call trigger ───────────────
 app.post('/call', async (req, res) => {
-    const gas  = req.body.gas  ?? latestData.gas;
+    const gas  = req.body.gas         ?? latestData.gas;
     const temp = req.body.temperature ?? latestData.temperature;
     const hum  = req.body.humidity    ?? latestData.humidity;
 
