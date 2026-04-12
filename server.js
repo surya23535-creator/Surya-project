@@ -1,26 +1,4 @@
-/*
- * ================================================================
- *  InduShield — Railway Relay Server  (server.js)
- *  Node.js + Express + Twilio Voice API
- * ================================================================
- *  ENVIRONMENT VARIABLES (set in Railway dashboard → Variables):
- *
- *    TWILIO_ACCOUNT_SID   → Your Twilio Account SID   (ACxxxxxxx)
- *    TWILIO_AUTH_TOKEN    → Your Twilio Auth Token
- *    TWILIO_FROM_NUMBER   → Your Twilio phone number  (+1xxxxxxxxxx)
- *    EMERGENCY_TO_NUMBER  → Primary emergency contact  (+91xxxxxxxxxx)
- *    EMERGENCY_TO_NUMBER2 → Secondary emergency contact (+91xxxxxxxxxx)
- *    PORT                 → (Railway sets this automatically)
- *
- * ================================================================
- *  Endpoints:
- *    POST /update   ← ESP32 sends sensor data here
- *    GET  /data     ← Dashboard reads latest sensor data
- *    POST /call     ← Dashboard triggers manual call
- *    GET  /ping     ← Keep-alive health check
- * ================================================================
- */
-
+Here is the full corrected server.js:
 const express = require('express');
 const cors    = require('cors');
 const twilio  = require('twilio');
@@ -28,20 +6,17 @@ const twilio  = require('twilio');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Twilio client ────────────────────────────────────────────
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
 const fromNumber = process.env.TWILIO_FROM_NUMBER;
-const toNumber1  = process.env.EMERGENCY_TO_NUMBER;   // +918919306277
-const toNumber2  = process.env.EMERGENCY_TO_NUMBER2;  // +919848419422
+const toNumber1  = process.env.EMERGENCY_TO_NUMBER;
+const toNumber2  = process.env.EMERGENCY_TO_NUMBER2;
 
 const client = twilio(accountSid, authToken);
 
-// ── Middleware ───────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
-// ── In-memory latest sensor data ────────────────────────────
 let latestData = {
     gas:         0,
     temperature: 0,
@@ -50,10 +25,8 @@ let latestData = {
     lastUpdate:  null
 };
 
-// Auto-call cooldown — prevent spam (30s cooldown)
 let autoCallCooldown = false;
 
-// ── YOUR CUSTOM VOICE MESSAGE — EDIT THIS ───────────────────
 function buildVoiceMessage(gas, temp, hum) {
     return `Alert! Alert! This is an automated emergency call from the InduShield monitoring system in the GIOE Lab. 
             A dangerous situation has been detected and immediate action is required. 
@@ -64,7 +37,6 @@ function buildVoiceMessage(gas, temp, hum) {
             This message will now repeat.`;
 }
 
-// ── Helper: call a single number ────────────────────────────
 async function callNumber(toNumber, gas, temp, hum) {
     const message = buildVoiceMessage(gas, temp, hum);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -89,7 +61,6 @@ async function callNumber(toNumber, gas, temp, hum) {
     }
 }
 
-// ── Helper: call BOTH numbers simultaneously ─────────────────
 async function makeTwilioCall(gas, temp, hum) {
     if (!accountSid || !authToken || !fromNumber) {
         console.error('[Twilio] Missing env variables — cannot make call');
@@ -104,7 +75,6 @@ async function makeTwilioCall(gas, temp, hum) {
         return { success: false, error: 'No emergency numbers configured' };
     }
 
-    // Call all numbers at the same time
     const results = await Promise.all(
         numbers.map(num => callNumber(num, gas, temp, hum))
     );
@@ -114,36 +84,22 @@ async function makeTwilioCall(gas, temp, hum) {
 
     console.log(`[Twilio] Called ${successful.length}/${numbers.length} numbers successfully`);
 
-    if (successful.length > 0) {
-        return {
-            success: true,
-            sid:     successful[0].sid,
-            to:      numbers.join(' & '),
-            results: results
-        };
-    } else {
-        return {
-            success: false,
-            error:   failed.map(f => f.error).join(', ')
-        };
-    }
+    return successful.length > 0
+        ? { success: true, sid: successful[0].sid, to: numbers.join(' & '), results }
+        : { success: false, error: failed.map(f => f.error).join(', ') };
 }
 
-// ════════════════════════════════════════════════════════════
-//  ROUTES
-// ════════════════════════════════════════════════════════════
-
-// ── GET /ping — keep-alive health check ─────────────────────
+// ── GET /ping ────────────────────────────────────────────────
 app.get('/ping', (req, res) => {
     res.json({ status: 'alive', uptime: process.uptime() });
 });
 
-// ── GET /data — dashboard reads latest sensor values ────────
+// ── GET /data ────────────────────────────────────────────────
 app.get('/data', (req, res) => {
     res.json(latestData);
 });
 
-// ── POST /update — ESP32 sends sensor data ───────────────────
+// ── POST /update ─────────────────────────────────────────────
 app.post('/update', async (req, res) => {
     const { gas, temperature, humidity, rssi } = req.body;
 
@@ -161,48 +117,38 @@ app.post('/update', async (req, res) => {
 
     console.log(`[Data] Gas:${Math.round(gas)}ppm Temp:${parseFloat(temperature).toFixed(1)}°C Hum:${parseFloat(humidity).toFixed(0)}%`);
 
-    // AUTO-CALL if gas exceeds danger threshold
     if (parseFloat(gas) >= 3000 && !autoCallCooldown) {
         autoCallCooldown = true;
         console.log(`[AutoCall] Gas critical at ${Math.round(gas)} ppm — calling both numbers`);
-
         makeTwilioCall(gas, temperature, humidity).then(result => {
             console.log('[AutoCall] Result:', result);
         });
-
         setTimeout(() => { autoCallCooldown = false; }, 30000);
     }
 
     res.json({ status: 'ok', received: latestData });
 });
 
-// ── POST /call — dashboard manual call trigger ───────────────
+// ── POST /call ───────────────────────────────────────────────
 app.post('/call', async (req, res) => {
     const gas  = req.body.gas         ?? latestData.gas;
     const temp = req.body.temperature ?? latestData.temperature;
     const hum  = req.body.humidity    ?? latestData.humidity;
 
-    console.log(`[ManualCall] Triggered — calling both numbers. Gas:${Math.round(gas)}ppm`);
+    console.log(`[ManualCall] Triggered — Gas:${Math.round(gas)}ppm`);
 
     const result = await makeTwilioCall(gas, temp, hum);
 
     if (result.success) {
-        res.json({
-            status:  'calling',
-            sid:     result.sid,
-            to:      result.to,
-            message: `Calling ${result.to}`
-        });
+        res.json({ status: 'calling', sid: result.sid, to: result.to });
     } else {
-        res.status(500).json({
-            status: 'error',
-            error:  result.error
-        });
+        res.status(500).json({ status: 'error', error: result.error });
     }
 });
 
 // ── Start server ─────────────────────────────────────────────
-app.listen(PORT, () => {
+// ✅ '0.0.0.0' required for Railway to route external traffic in
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n╔══════════════════════════════════╗`);
     console.log(`║  InduShield Railway Server       ║`);
     console.log(`║  Listening on port ${PORT}          ║`);
