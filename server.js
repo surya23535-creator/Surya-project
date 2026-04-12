@@ -1,4 +1,3 @@
-Here is the full corrected server.js:
 const express = require('express');
 const cors    = require('cors');
 const twilio  = require('twilio');
@@ -12,7 +11,30 @@ const fromNumber = process.env.TWILIO_FROM_NUMBER;
 const toNumber1  = process.env.EMERGENCY_TO_NUMBER;
 const toNumber2  = process.env.EMERGENCY_TO_NUMBER2;
 
-const client = twilio(accountSid, authToken);
+// ✅ Validate env variables BEFORE initializing Twilio
+const missingVars = [];
+if (!accountSid) missingVars.push('TWILIO_ACCOUNT_SID');
+if (!authToken)  missingVars.push('TWILIO_AUTH_TOKEN');
+if (!fromNumber) missingVars.push('TWILIO_FROM_NUMBER');
+if (!toNumber1)  missingVars.push('EMERGENCY_TO_NUMBER');
+
+if (missingVars.length > 0) {
+    console.warn(`[Twilio] ⚠ Missing env vars: ${missingVars.join(', ')}`);
+    console.warn('[Twilio] ⚠ Voice calls disabled — server will still run');
+}
+
+// ✅ Only initialize Twilio client if credentials exist
+//    Previously this line ran unconditionally and crashed the server
+let client = null;
+try {
+    if (accountSid && authToken) {
+        client = twilio(accountSid, authToken);
+        console.log('[Twilio] ✓ Client initialized');
+    }
+} catch (err) {
+    console.error('[Twilio] ✗ Client init failed:', err.message);
+    // ✅ Don't crash — server continues without call feature
+}
 
 app.use(cors());
 app.use(express.json());
@@ -62,9 +84,13 @@ async function callNumber(toNumber, gas, temp, hum) {
 }
 
 async function makeTwilioCall(gas, temp, hum) {
-    if (!accountSid || !authToken || !fromNumber) {
-        console.error('[Twilio] Missing env variables — cannot make call');
-        return { success: false, error: 'Twilio not configured' };
+    // ✅ Guard — don't attempt call if client failed to initialize
+    if (!client) {
+        console.error('[Twilio] Client not available — skipping call');
+        return { success: false, error: 'Twilio not initialized' };
+    }
+    if (!fromNumber) {
+        return { success: false, error: 'TWILIO_FROM_NUMBER not set' };
     }
 
     const numbers = [];
@@ -147,14 +173,31 @@ app.post('/call', async (req, res) => {
 });
 
 // ── Start server ─────────────────────────────────────────────
-// ✅ '0.0.0.0' required for Railway to route external traffic in
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`\n╔══════════════════════════════════╗`);
     console.log(`║  InduShield Railway Server       ║`);
     console.log(`║  Listening on port ${PORT}          ║`);
     console.log(`╚══════════════════════════════════╝`);
-    console.log(`[Twilio] FROM    : ${fromNumber  || '⚠ NOT SET'}`);
-    console.log(`[Twilio] TO (1)  : ${toNumber1   || '⚠ NOT SET'}`);
-    console.log(`[Twilio] TO (2)  : ${toNumber2   || '⚠ NOT SET'}`);
+    console.log(`[Twilio] FROM    : ${fromNumber || '⚠ NOT SET'}`);
+    console.log(`[Twilio] TO (1)  : ${toNumber1  || '⚠ NOT SET'}`);
+    console.log(`[Twilio] TO (2)  : ${toNumber2  || '⚠ NOT SET'}`);
     console.log(`[Twilio] SID     : ${accountSid ? accountSid.slice(0,10)+'...' : '⚠ NOT SET'}`);
 });
+Also add this to package.json to lock the Node version for Railway:
+{
+  "name": "induShield-server",
+  "version": "1.0.0",
+  "description": "InduShield gas monitor relay server with Twilio",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "twilio": "^5.3.0"
+  }
+            }
