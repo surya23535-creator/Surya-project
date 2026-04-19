@@ -18,6 +18,8 @@ const TEMP_DANGER = 40.0;
 const HUM_WARN    = 70.0;
 const HUM_DANGER  = 80.0;
 
+const DATA_TIMEOUT_MS = 10000; // 10 seconds — if no ESP32 data, go stale
+
 const missingVars = [];
 if (!accountSid) missingVars.push('TWILIO_ACCOUNT_SID');
 if (!authToken)  missingVars.push('TWILIO_AUTH_TOKEN');
@@ -52,6 +54,32 @@ let latestData = {
 let autoCallCD = { gas: false, temp: false, hum: false };
 let autoSmsCD  = { gas: false, temp: false, hum: false };
 
+// ── Stale check ───────────────────────────────────────────────
+function isDataStale() {
+    if (!latestData.lastUpdate) return true;
+    return (Date.now() - new Date(latestData.lastUpdate).getTime()) > DATA_TIMEOUT_MS;
+}
+
+// ── Watchdog: reset if no data for 10s ───────────────────────
+setInterval(() => {
+    if (isDataStale()) {
+        const wasLive = latestData.gas > 0 || latestData.temperature > 0;
+        if (wasLive) {
+            console.log('[Watchdog] No data received — resetting to safe values');
+        }
+        latestData = {
+            gas:         0,
+            temperature: 0,
+            humidity:    0,
+            rssi:        0,
+            lastUpdate:  latestData.lastUpdate // keep last seen time for reference
+        };
+        autoCallCD = { gas: false, temp: false, hum: false };
+        autoSmsCD  = { gas: false, temp: false, hum: false };
+    }
+}, 5000);
+
+// ── Helpers ───────────────────────────────────────────────────
 function levelStr(val, warn, danger) {
     if (val >= danger) return 'DANGER';
     if (val >= warn)   return 'WARNING';
@@ -70,15 +98,15 @@ function buildVoiceMessage(gas, temp, hum) {
         'Alert! Alert! This is an automated emergency call from the InduShield ' +
         'monitoring system in the GIOE Lab. ' +
         'A dangerous situation has been detected and immediate action is required. ' +
-        'Gas concentration is '   + Math.round(gas)                    + ' parts per million. ' +
-        'Temperature is '         + parseFloat(temp).toFixed(1)        + ' degrees Celsius. ' +
-        'Humidity is '            + parseFloat(hum).toFixed(0)         + ' percent. ' +
+        'Gas concentration is '   + Math.round(gas)             + ' parts per million. ' +
+        'Temperature is '         + parseFloat(temp).toFixed(1) + ' degrees Celsius. ' +
+        'Humidity is '            + parseFloat(hum).toFixed(0)  + ' percent. ' +
         'Please evacuate the lab immediately and contact the lab supervisor. ' +
         'This message will now repeat.'
     );
 }
 
-// ✅ FIXED: SMS body kept under 160 characters
+// ✅ SMS under 160 chars
 function buildSMSBody(gas, temp, hum) {
     const gS = levelStr(gas,  GAS_WARN,  GAS_DANGER);
     const tS = levelStr(temp, TEMP_WARN, TEMP_DANGER);
@@ -131,7 +159,6 @@ async function makeTwilioCall(gas, temp, hum) {
     if (!fromNumber) return { success: false, error: 'TWILIO_FROM_NUMBER not set' };
     const numbers = getNumbers();
     if (numbers.length === 0) return { success: false, error: 'No emergency numbers configured' };
-
     const results    = await Promise.all(numbers.map(n => callNumber(n, gas, temp, hum)));
     const successful = results.filter(r => r.success);
     console.log('[Twilio] Called ' + successful.length + '/' + numbers.length + ' successfully');
@@ -145,7 +172,6 @@ async function makeTwilioSMS(gas, temp, hum) {
     if (!fromNumber) return { success: false, error: 'TWILIO_FROM_NUMBER not set' };
     const numbers = getNumbers();
     if (numbers.length === 0) return { success: false, error: 'No emergency numbers configured' };
-
     const results    = await Promise.all(numbers.map(n => smsNumber(n, gas, temp, hum)));
     const successful = results.filter(r => r.success);
     console.log('[Twilio] SMS sent to ' + successful.length + '/' + numbers.length + ' successfully');
@@ -154,12 +180,20 @@ async function makeTwilioSMS(gas, temp, hum) {
         : { success: false, error: results.map(f => f.error).join(', '), results };
 }
 
+// ─────────────────────────────────────────────────────────────
+//  ROUTES
+// ─────────────────────────────────────────────────────────────
+
 app.get('/ping', (req, res) => {
     res.json({ status: 'alive', uptime: process.uptime(), ts: new Date().toISOString() });
 });
 
+// ✅ Returns stale:true when ESP32 is disconnected
 app.get('/data', (req, res) => {
-    res.json(latestData);
+    res.json({
+        ...latestData,
+        stale: isDataStale()
+    });
 });
 
 app.post('/update', async (req, res) => {
@@ -220,9 +254,7 @@ app.post('/call', async (req, res) => {
     const g = req.body.gas         !== undefined ? parseFloat(req.body.gas)         : latestData.gas;
     const t = req.body.temperature !== undefined ? parseFloat(req.body.temperature) : latestData.temperature;
     const h = req.body.humidity    !== undefined ? parseFloat(req.body.humidity)    : latestData.humidity;
-
     console.log('[ManualCall] Triggered — Gas:' + Math.round(g) + ' Temp:' + t.toFixed(1) + ' Hum:' + h.toFixed(0));
-
     const result = await makeTwilioCall(g, t, h);
     if (result.success) {
         res.json({ status: 'calling', sid: result.sid, to: result.to });
@@ -235,9 +267,7 @@ app.post('/sms', async (req, res) => {
     const g = req.body.gas         !== undefined ? parseFloat(req.body.gas)         : latestData.gas;
     const t = req.body.temperature !== undefined ? parseFloat(req.body.temperature) : latestData.temperature;
     const h = req.body.humidity    !== undefined ? parseFloat(req.body.humidity)    : latestData.humidity;
-
     console.log('[ManualSMS] Triggered — Gas:' + Math.round(g) + ' Temp:' + t.toFixed(1) + ' Hum:' + h.toFixed(0));
-
     const result = await makeTwilioSMS(g, t, h);
     if (result.success) {
         res.json({ status: 'sent', sid: result.sid, to: result.to });
@@ -250,14 +280,11 @@ app.post('/alert', async (req, res) => {
     const g = req.body.gas         !== undefined ? parseFloat(req.body.gas)         : latestData.gas;
     const t = req.body.temperature !== undefined ? parseFloat(req.body.temperature) : latestData.temperature;
     const h = req.body.humidity    !== undefined ? parseFloat(req.body.humidity)    : latestData.humidity;
-
     console.log('[FullAlert] SMS + Call triggered — Gas:' + Math.round(g));
-
     const [callResult, smsResult] = await Promise.all([
         makeTwilioCall(g, t, h),
         makeTwilioSMS(g, t, h)
     ]);
-
     const anySuccess = callResult.success || smsResult.success;
     if (anySuccess) {
         res.json({ status: 'ok', call: callResult, sms: smsResult });
@@ -266,6 +293,7 @@ app.post('/alert', async (req, res) => {
     }
 });
 
+// ─────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════');
     console.log(' InduShield Railway Server  port:' + PORT);
@@ -277,6 +305,7 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('[Thresholds] Gas warn/danger : ' + GAS_WARN + '/' + GAS_DANGER + ' ppm');
     console.log('[Thresholds] Temp warn/danger: ' + TEMP_WARN + '/' + TEMP_DANGER + ' °C');
     console.log('[Thresholds] Hum  warn/danger: ' + HUM_WARN  + '/' + HUM_DANGER  + ' %');
+    console.log('[Watchdog] Stale timeout     : ' + DATA_TIMEOUT_MS/1000 + 's');
     console.log('───────────────────────────────────────');
     console.log('[Routes] GET  /ping  /data');
     console.log('[Routes] POST /update  /call  /sms  /alert');
