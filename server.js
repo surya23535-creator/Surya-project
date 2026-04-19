@@ -5,22 +5,19 @@ const twilio  = require('twilio');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Twilio credentials from Railway env vars ──────────────────
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken  = process.env.TWILIO_AUTH_TOKEN;
-const fromNumber = process.env.TWILIO_FROM_NUMBER;   // e.g. +14155552671
-const toNumber1  = process.env.EMERGENCY_TO_NUMBER;  // e.g. +918919306277
-const toNumber2  = process.env.EMERGENCY_TO_NUMBER2; // e.g. +919848419422
+const fromNumber = process.env.TWILIO_FROM_NUMBER;
+const toNumber1  = process.env.EMERGENCY_TO_NUMBER;
+const toNumber2  = process.env.EMERGENCY_TO_NUMBER2;
 
-// ── Thresholds (must match ESP32 firmware + dashboard) ────────
-const GAS_WARN    = 2000;  // ppm
-const GAS_DANGER  = 3000;  // ppm
-const TEMP_WARN   = 35.0;  // °C
+const GAS_WARN    = 2000;
+const GAS_DANGER  = 3000;
+const TEMP_WARN   = 35.0;
 const TEMP_DANGER = 40.0;
-const HUM_WARN    = 70.0;  // %
+const HUM_WARN    = 70.0;
 const HUM_DANGER  = 80.0;
 
-// ── Startup check ─────────────────────────────────────────────
 const missingVars = [];
 if (!accountSid) missingVars.push('TWILIO_ACCOUNT_SID');
 if (!authToken)  missingVars.push('TWILIO_AUTH_TOKEN');
@@ -44,7 +41,6 @@ try {
 app.use(cors());
 app.use(express.json());
 
-// ── In-memory state ───────────────────────────────────────────
 let latestData = {
     gas:         0,
     temperature: 0,
@@ -53,13 +49,8 @@ let latestData = {
     lastUpdate:  null
 };
 
-// Per-sensor cooldowns (server-side, 60 s each)
 let autoCallCD = { gas: false, temp: false, hum: false };
 let autoSmsCD  = { gas: false, temp: false, hum: false };
-
-// ─────────────────────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────────────────────
 
 function levelStr(val, warn, danger) {
     if (val >= danger) return 'DANGER';
@@ -87,22 +78,19 @@ function buildVoiceMessage(gas, temp, hum) {
     );
 }
 
+// ✅ FIXED: SMS body kept under 160 characters
 function buildSMSBody(gas, temp, hum) {
     const gS = levelStr(gas,  GAS_WARN,  GAS_DANGER);
     const tS = levelStr(temp, TEMP_WARN, TEMP_DANGER);
     const hS = levelStr(hum,  HUM_WARN,  HUM_DANGER);
     return (
-        '🚨 InduShield DANGER Alert!\n' +
-        'Lab: GIOE Lab\n' +
-        'Gas: '         + Math.round(gas)               + ' ppm [' + gS + ']\n' +
-        'Temperature: ' + parseFloat(temp).toFixed(1)   + ' C ['   + tS + ']\n' +
-        'Humidity: '    + parseFloat(hum).toFixed(0)    + '% ['    + hS + ']\n' +
-        'Evacuate immediately and contact supervisor!\n' +
-        'Time: '        + new Date().toISOString()
+        'DANGER! Gas:' + Math.round(gas) + 'ppm[' + gS + '] ' +
+        'Temp:' + parseFloat(temp).toFixed(1) + 'C[' + tS + '] ' +
+        'Hum:' + parseFloat(hum).toFixed(0) + '%[' + hS + '] ' +
+        'Evacuate GIOE Lab now!'
     );
 }
 
-// ── Single call to one number ─────────────────────────────────
 async function callNumber(toNum, gas, temp, hum) {
     const msg = buildVoiceMessage(gas, temp, hum);
     const twiml =
@@ -123,7 +111,6 @@ async function callNumber(toNum, gas, temp, hum) {
     }
 }
 
-// ── SMS to one number ─────────────────────────────────────────
 async function smsNumber(toNum, gas, temp, hum) {
     try {
         const msg = await client.messages.create({
@@ -139,7 +126,6 @@ async function smsNumber(toNum, gas, temp, hum) {
     }
 }
 
-// ── Call ALL numbers ──────────────────────────────────────────
 async function makeTwilioCall(gas, temp, hum) {
     if (!client)     return { success: false, error: 'Twilio not initialized' };
     if (!fromNumber) return { success: false, error: 'TWILIO_FROM_NUMBER not set' };
@@ -154,7 +140,6 @@ async function makeTwilioCall(gas, temp, hum) {
         : { success: false, error: results.map(f => f.error).join(', '), results };
 }
 
-// ── SMS ALL numbers ───────────────────────────────────────────
 async function makeTwilioSMS(gas, temp, hum) {
     if (!client)     return { success: false, error: 'Twilio not initialized' };
     if (!fromNumber) return { success: false, error: 'TWILIO_FROM_NUMBER not set' };
@@ -169,21 +154,14 @@ async function makeTwilioSMS(gas, temp, hum) {
         : { success: false, error: results.map(f => f.error).join(', '), results };
 }
 
-// ─────────────────────────────────────────────────────────────
-//  ROUTES
-// ─────────────────────────────────────────────────────────────
-
-// Health / keep-alive
 app.get('/ping', (req, res) => {
     res.json({ status: 'alive', uptime: process.uptime(), ts: new Date().toISOString() });
 });
 
-// Dashboard polls this for live readings
 app.get('/data', (req, res) => {
     res.json(latestData);
 });
 
-// ── ESP32 posts here every 2 s ────────────────────────────────
 app.post('/update', async (req, res) => {
     const { gas, temperature, humidity, rssi } = req.body;
 
@@ -200,44 +178,32 @@ app.post('/update', async (req, res) => {
 
     console.log('[Data] Gas:' + Math.round(g) + 'ppm  Temp:' + t.toFixed(1) + 'C  Hum:' + h.toFixed(0) + '%  RSSI:' + r);
 
-    // ── Auto-call on gas danger ───────────────────────────────
     if (g >= GAS_DANGER && !autoCallCD.gas) {
         autoCallCD.gas = true;
         console.log('[AutoCall] Gas critical at ' + Math.round(g) + ' ppm — initiating call');
-        makeTwilioCall(g, t, h).then(result => {
-            console.log('[AutoCall] Result:', JSON.stringify(result));
-        });
+        makeTwilioCall(g, t, h).then(result => console.log('[AutoCall] Result:', JSON.stringify(result)));
         setTimeout(() => { autoCallCD.gas = false; }, 60000);
     }
 
-    // ── Auto-call on temp danger ──────────────────────────────
     if (t >= TEMP_DANGER && !autoCallCD.temp) {
         autoCallCD.temp = true;
         console.log('[AutoCall] Temp critical at ' + t.toFixed(1) + '°C — initiating call');
-        makeTwilioCall(g, t, h).then(result => {
-            console.log('[AutoCall] Result:', JSON.stringify(result));
-        });
+        makeTwilioCall(g, t, h).then(result => console.log('[AutoCall] Result:', JSON.stringify(result)));
         setTimeout(() => { autoCallCD.temp = false; }, 60000);
     }
 
-    // ── Auto-call on humidity danger ──────────────────────────
     if (h >= HUM_DANGER && !autoCallCD.hum) {
         autoCallCD.hum = true;
         console.log('[AutoCall] Humidity critical at ' + h.toFixed(0) + '% — initiating call');
-        makeTwilioCall(g, t, h).then(result => {
-            console.log('[AutoCall] Result:', JSON.stringify(result));
-        });
+        makeTwilioCall(g, t, h).then(result => console.log('[AutoCall] Result:', JSON.stringify(result)));
         setTimeout(() => { autoCallCD.hum = false; }, 60000);
     }
 
-    // ── Auto-SMS on ANY danger level ──────────────────────────
     const anyDanger = g >= GAS_DANGER || t >= TEMP_DANGER || h >= HUM_DANGER;
-    if (anyDanger && !autoSmsCD.gas) {   // use gas key as combined lock
+    if (anyDanger && !autoSmsCD.gas) {
         autoSmsCD.gas = true;
         console.log('[AutoSMS] Danger detected — sending SMS');
-        makeTwilioSMS(g, t, h).then(result => {
-            console.log('[AutoSMS] Result:', JSON.stringify(result));
-        });
+        makeTwilioSMS(g, t, h).then(result => console.log('[AutoSMS] Result:', JSON.stringify(result)));
         setTimeout(() => { autoSmsCD.gas = false; }, 60000);
     }
 
@@ -250,7 +216,6 @@ app.post('/update', async (req, res) => {
     });
 });
 
-// ── Manual call only ──────────────────────────────────────────
 app.post('/call', async (req, res) => {
     const g = req.body.gas         !== undefined ? parseFloat(req.body.gas)         : latestData.gas;
     const t = req.body.temperature !== undefined ? parseFloat(req.body.temperature) : latestData.temperature;
@@ -266,7 +231,6 @@ app.post('/call', async (req, res) => {
     }
 });
 
-// ── Manual SMS only ───────────────────────────────────────────
 app.post('/sms', async (req, res) => {
     const g = req.body.gas         !== undefined ? parseFloat(req.body.gas)         : latestData.gas;
     const t = req.body.temperature !== undefined ? parseFloat(req.body.temperature) : latestData.temperature;
@@ -282,7 +246,6 @@ app.post('/sms', async (req, res) => {
     }
 });
 
-// ── Manual SMS + Call (full alert) ───────────────────────────
 app.post('/alert', async (req, res) => {
     const g = req.body.gas         !== undefined ? parseFloat(req.body.gas)         : latestData.gas;
     const t = req.body.temperature !== undefined ? parseFloat(req.body.temperature) : latestData.temperature;
@@ -290,7 +253,6 @@ app.post('/alert', async (req, res) => {
 
     console.log('[FullAlert] SMS + Call triggered — Gas:' + Math.round(g));
 
-    // Fire both simultaneously
     const [callResult, smsResult] = await Promise.all([
         makeTwilioCall(g, t, h),
         makeTwilioSMS(g, t, h)
@@ -304,7 +266,6 @@ app.post('/alert', async (req, res) => {
     }
 });
 
-// ─────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
     console.log('═══════════════════════════════════════');
     console.log(' InduShield Railway Server  port:' + PORT);
@@ -321,4 +282,3 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('[Routes] POST /update  /call  /sms  /alert');
     console.log('═══════════════════════════════════════');
 });
-
